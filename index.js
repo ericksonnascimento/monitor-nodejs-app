@@ -1,9 +1,11 @@
-const http = require('http')
-const url = require('url')
+const express = require('express')
 const client = require('prom-client')
+const PORT = process.env.PORT || 8080
 
+const app = express()
 const register = new client.Registry()
 
+app.use(express.json())
 
 register.setDefaultLabels({
     app: 'monitor-nodejs-app'
@@ -11,31 +13,38 @@ register.setDefaultLabels({
 
 client.collectDefaultMetrics({register})
 
-const httpRequestDurationMicroseconds = new client.Histogram({
+const requestDuration = new client.Histogram({
     name: 'http_request_duration_seconds',
     help: 'Duration of HTTP request in microseconds',
     labelNames: ['method', 'route', 'code'],
-    buckets: [0.1, 0.3, 0.5, 0.7, 1, 3, 5, 7, 10]
 })
 
-register.registerMetric(httpRequestDurationMicroseconds)
-
-const server = http.createServer(async (req, res) =>{
-
-    const end = httpRequestDurationMicroseconds.startTimer()
-
-    const route = url.parse(req.url).pathname
-
-    if(route==='/metrics'){
-        res.setHeader('Content-Type', register.contentType)
-        res.end(await register.metrics())
-    }
-
-    end({
-        route,
-        code: res.statusCode,
-        method: req.method
+const profileMiddleware = (req, res, next) =>{
+    const start = Date.now()
+    res.once('finish', () =>{
+        const duration = Date.now() - start
+        requestDuration
+            .labels(req.method, req.url, res.statusCode)
+            .observe(duration)
     })
+    next()
+}
+
+app.use(profileMiddleware)
+
+app.get('/health', (req, res) =>{
+    return res.status(200).send({message: 'Healthy'})
 })
 
-server.listen(8080)
+app.get('/metrics', async(req, res) => {
+    try{
+        res.set('Content-Type', register.contentType)
+        res.end(await register.metrics())
+    }catch(ex){
+        res.status(500).end(ex)
+    }
+})
+
+app.listen(PORT, () => {
+    console.log('Server running on PORT: ', PORT)
+})
